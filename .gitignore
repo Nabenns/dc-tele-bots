@@ -1,0 +1,31 @@
+# Environment
+.env
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Log files
+*.log
+bot.log
+
+# Database
+*.db
+config/bot_config.db
+src/config/*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db 
