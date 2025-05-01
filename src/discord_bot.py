@@ -321,44 +321,62 @@ class DiscordBot(commands.Bot):
         if not message.author.bot and message.content.startswith(self.command_prefix):
             return
         
-        # Prepare message content
-        content = message.content
+        # ONLY USE RAW CONTENT - no formatting, no author name
+        # Extract just the pure message content
+        content = message.content.strip() if message.content else ""
         
-        # Handle embeds if present
+        # Get attachment URLs if any - we'll send these directly
+        attachments = [attachment.url for attachment in message.attachments] if message.attachments else []
+        
+        # For images/attachments from discord apps/webhook/bots
+        # Handle embeds if present - extract both content and images
         embed_text = ""
+        embed_images = []
         if message.embeds:
             for embed in message.embeds:
-                if embed.title:
-                    embed_text += f"\n**{embed.title}**\n"
+                # For embeds, just extract the important content
                 if embed.description:
-                    embed_text += f"{embed.description}\n"
+                    embed_text += f"{embed.description.strip()}\n"
+                
+                # Extract images from embeds
+                if embed.image and embed.image.url:
+                    embed_images.append(embed.image.url)
+                if embed.thumbnail and embed.thumbnail.url:
+                    embed_images.append(embed.thumbnail.url)
+                    
+                # Extract images from fields if they contain URLs
                 if embed.fields:
                     for field in embed.fields:
-                        embed_text += f"\n**{field.name}**\n{field.value}\n"
-                if embed.footer:
-                    embed_text += f"\n{embed.footer.text}\n"
-                if embed.image:
-                    embed_text += f"\n[Image]({embed.image.url})\n"
-                if embed.thumbnail:
-                    embed_text += f"\n[Thumbnail]({embed.thumbnail.url})\n"
+                        # Only extract field value if it might contain an image URL
+                        if field.value and ('http://' in field.value or 'https://' in field.value):
+                            # Extract URLs from the field
+                            urls = self.extract_urls(field.value)
+                            for url in urls:
+                                if self.is_likely_image_url(url):
+                                    embed_images.append(url)
             
             # Add embed text to content
             if embed_text:
                 if content:
-                    content += "\n\n" + embed_text
+                    # Only add embed content if it's different from main content
+                    if embed_text.strip() != content.strip():
+                        content += "\n\n" + embed_text
                 else:
                     content = embed_text
         
+        # Add embed images to attachments
+        if embed_images:
+            attachments.extend(embed_images)
+        
         # If no content and no attachments after processing, nothing to forward
-        if not content and not message.attachments:
+        if not content and not attachments:
             return
             
-        # Get attachment URLs if any
-        attachments = [attachment.url for attachment in message.attachments] if message.attachments else []
-        
         # Forward the message to Telegram
         try:
             logger.info(f"Forwarding message from Discord channel {message.channel.name} to Telegram chat {config['telegram_chat_id']}")
+            logger.debug(f"Content: {content}")
+            logger.debug(f"Attachments: {attachments}")
             
             success = await self.telegram_bot.forward_discord_message(
                 chat_id=config['telegram_chat_id'],
@@ -389,4 +407,20 @@ class DiscordBot(commands.Bot):
                         pass  # If we can't send the error message, just continue
         except Exception as e:
             logger.error(f"Error in message forwarding: {e}")
-            # Continue processing to avoid breaking the bot 
+            # Continue processing to avoid breaking the bot
+            
+    def extract_urls(self, text):
+        """Extract URLs from text."""
+        if not text:
+            return []
+        # Simple URL regex pattern
+        url_pattern = r'https?://[^\s<>"\']+'
+        return re.findall(url_pattern, text)
+        
+    def is_likely_image_url(self, url):
+        """Check if a URL is likely to point to an image."""
+        if not url:
+            return False
+        # Check common image extensions
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+        return any(url.lower().endswith(ext) for ext in image_extensions) 

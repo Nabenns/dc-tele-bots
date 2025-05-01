@@ -65,27 +65,44 @@ class TelegramBot:
     async def is_image_url(self, url: str) -> bool:
         """Check if URL points to an image by examining the extension or content type."""
         # Check by extension first
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
-        if any(url.lower().endswith(ext) for ext in image_extensions):
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']
+        
+        # Discord and other common image hosting URLs
+        image_hosts = [
+            'media.discordapp.net', 'cdn.discordapp.com', 'i.imgur.com', 
+            'images-ext-', 'images-', '.staticflickr.com', 'i.gyazo.com',
+            'pbs.twimg.com', 'i.redd.it', 'preview.redd.it', 'tradingview.com'
+        ]
+        
+        # Quick check for common image hosts and extensions
+        url_lower = url.lower()
+        if any(ext in url_lower for ext in image_extensions):
+            return True
+        if any(host in url_lower for host in image_hosts):
             return True
             
-        # If not clear from extension, check by requesting headers
+        # If not clear from URL pattern, check by requesting headers
         try:
-            async with self.session.head(url, allow_redirects=True, timeout=5) as response:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            async with self.session.head(url, allow_redirects=True, timeout=5, headers=headers) as response:
                 if response.status == 200:
                     content_type = response.headers.get('Content-Type', '')
                     return content_type.startswith('image/')
                 return False
         except Exception as e:
-            logger.error(f"Error checking if URL is image: {e}")
+            logger.warning(f"Error checking if URL is image (treating as non-image): {e}")
             return False
     
     async def download_image(self, url: str) -> Optional[bytes]:
         """Download an image from URL."""
         try:
-            async with self.session.get(url, timeout=10) as response:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            async with self.session.get(url, timeout=15, headers=headers) as response:
                 if response.status == 200:
-                    return await response.read()
+                    image_data = await response.read()
+                    # Log size for debugging
+                    logger.info(f"Downloaded image: {len(image_data)} bytes")
+                    return image_data
                 else:
                     logger.error(f"Failed to download image, status: {response.status}")
                     return None
@@ -111,15 +128,12 @@ class TelegramBot:
         """
         try:
             # Skip if no content and no attachments
-            if not content and not attachments:
+            if not content and not (attachments and len(attachments) > 0):
                 logger.warning("No content or attachments to forward")
                 return False
                 
-            # Format the message - only include author if provided
-            if author:
-                formatted_message = f"**{author}**:\n{content}"
-            else:
-                formatted_message = content
+            # Use content as is - no additional formatting
+            formatted_message = content
             
             # Handle character limit for Telegram messages (4096 chars)
             if len(formatted_message) > 4000:
@@ -129,18 +143,26 @@ class TelegramBot:
             message_success = False
             attachment_success = False
             
+            # Log what we're processing
+            logger.info(f"Processing message with {len(attachments) if attachments else 0} attachments")
+            if attachments:
+                logger.debug(f"Attachment URLs: {attachments}")
+            
             # First, process attachments - especially images
             if attachments:
                 for url in attachments:
                     try:
                         # Check if it's an image URL
-                        if await self.is_image_url(url):
+                        is_image = await self.is_image_url(url)
+                        logger.info(f"URL: {url} - Is image: {is_image}")
+                        
+                        if is_image:
                             # Download the image
                             logger.info(f"Downloading image from {url}")
                             image_data = await self.download_image(url)
                             
-                            if image_data:
-                                # If we have text content, send it with the first image
+                            if image_data and len(image_data) > 0:
+                                # If we have text content, send it with the first image only if needed
                                 if not message_success and formatted_message:
                                     try:
                                         # Create a BytesIO object from the image data
@@ -152,16 +174,18 @@ class TelegramBot:
                                             await self.bot.send_photo(
                                                 chat_id=chat_id,
                                                 photo=photo,
-                                                caption=formatted_message,
+                                                # Only add caption if the image doesn't describe itself
+                                                caption=formatted_message if not self.url_in_content(formatted_message, url) else None,
                                                 message_thread_id=int(topic_id),
-                                                parse_mode='Markdown'
+                                                parse_mode=None  # No markdown/HTML parsing
                                             )
                                         else:
                                             await self.bot.send_photo(
                                                 chat_id=chat_id,
                                                 photo=photo,
-                                                caption=formatted_message,
-                                                parse_mode='Markdown'
+                                                # Only add caption if the image doesn't describe itself
+                                                caption=formatted_message if not self.url_in_content(formatted_message, url) else None,
+                                                parse_mode=None  # No markdown/HTML parsing
                                             )
                                             
                                         # Mark message as sent successfully
@@ -193,13 +217,16 @@ class TelegramBot:
                                         logger.info(f"Sent image without caption")
                                     except Exception as e:
                                         logger.error(f"Failed to send image: {e}")
-                                        # Try sending URL as fallback
+                                        # If we can't send as photo, try sending URL
                                         await self.send_attachment_url(chat_id, url, topic_id)
                             else:
-                                # If failed to download, send as URL
+                                logger.warning(f"Image data empty or download failed, sending URL instead")
+                                # Fallback to URL if download failed
                                 await self.send_attachment_url(chat_id, url, topic_id)
+                                attachment_success = True
                         else:
-                            # Not an image, just send URL
+                            # Not a recognized image, send as URL
+                            logger.info(f"Not recognized as image, sending as URL: {url}")
                             await self.send_attachment_url(chat_id, url, topic_id)
                             attachment_success = True
                     except Exception as e:
@@ -217,9 +244,22 @@ class TelegramBot:
             logger.error(f"Error forwarding Discord message to Telegram: {e}")
             return False
             
+    def url_in_content(self, content: str, url: str) -> bool:
+        """Check if URL is already contained in the content."""
+        if not content or not url:
+            return False
+        # Simplify URL for comparison
+        simple_url = url.split('?')[0]  # Remove query params
+        simple_url = simple_url.split('/')[-1]  # Get filename
+        return simple_url in content
+
     async def send_text_message(self, chat_id: str, text: str, topic_id: Optional[str] = None) -> bool:
         """Send a text message to Telegram."""
         try:
+            # Skip empty messages
+            if not text or not text.strip():
+                return False
+            
             # Try sending with topic_id first if provided
             if topic_id:
                 try:
@@ -230,7 +270,7 @@ class TelegramBot:
                         chat_id=chat_id,
                         text=text,
                         message_thread_id=message_thread_id,
-                        parse_mode='Markdown'
+                        parse_mode=None  # No markdown/HTML parsing
                     )
                     logger.info(f"Text message sent to topic {topic_id}")
                     return True
@@ -244,7 +284,7 @@ class TelegramBot:
                 await self.bot.send_message(
                     chat_id=chat_id,
                     text=text,
-                    parse_mode='Markdown'
+                    parse_mode=None  # No markdown/HTML parsing
                 )
                 logger.info(f"Text message sent to main chat")
                 return True
